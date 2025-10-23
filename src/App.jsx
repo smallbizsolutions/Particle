@@ -14,7 +14,9 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [themeKey, setThemeKey] = useState('plasma');
   const [mirror, setMirror] = useState(true);
-  const [maskCanvas, setMaskCanvas] = useState(null); // <-- segmentation mask canvas
+  const [intensity, setIntensity] = useState(1);
+  const [trailEffect, setTrailEffect] = useState(true);
+  const [maskCanvas, setMaskCanvas] = useState(null);
 
   return (
     <div className="app">
@@ -26,7 +28,7 @@ export default function App() {
           facingMode="user"
           mirror={mirror}
           onReady={() => setRunning(true)}
-          onMaskReady={setMaskCanvas}   // <-- receive mask canvas
+          onMaskReady={setMaskCanvas}
         />
       </div>
 
@@ -35,15 +37,18 @@ export default function App() {
         running={running}
         theme={THEMES[themeKey]}
         mirror={mirror}
-        maskCanvas={maskCanvas}        // <-- pass mask canvas to particles
+        maskCanvas={maskCanvas}
+        intensity={intensity}
+        trailEffect={trailEffect}
       />
 
       <div className="panel">
         <button onClick={() => setMirror(m => !m)}>
-          {mirror ? 'Unmirror' : 'Mirror'}
+          {mirror ? '🪞 Unmirror' : '🪞 Mirror'}
         </button>
 
         <label>
+          <span style={{ fontSize: '11px', opacity: 0.7, marginRight: '4px' }}>Theme</span>
           <select value={themeKey} onChange={e => setThemeKey(e.target.value)}>
             {Object.keys(THEMES).map(k => (
               <option key={k} value={k}>{k}</option>
@@ -51,11 +56,35 @@ export default function App() {
           </select>
         </label>
 
-        <small style={{ opacity: 0.85 }}>Particles cling to your outline. Try waving fingers close to camera.</small>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '120px' }}>
+          <span style={{ fontSize: '11px', opacity: 0.7 }}>
+            Intensity: {intensity.toFixed(1)}x
+          </span>
+          <input 
+            type="range" 
+            min="0.3" 
+            max="2" 
+            step="0.1" 
+            value={intensity}
+            onChange={e => setIntensity(+e.target.value)}
+            style={{ width: '100%' }}
+          />
+        </label>
+
+        <button 
+          onClick={() => setTrailEffect(t => !t)}
+          style={{ fontSize: '11px' }}
+        >
+          {trailEffect ? '✨ Trails On' : '○ Trails Off'}
+        </button>
+
+        <small style={{ opacity: 0.85, marginLeft: '8px' }}>
+          Wave your hands near the camera
+        </small>
       </div>
 
       <div className="hint">
-        If the camera doesn’t start on iOS, tap once then refresh (browser gesture requirement).
+        If the camera doesn't start on iOS, tap once then refresh (browser gesture requirement).
       </div>
     </div>
   );
