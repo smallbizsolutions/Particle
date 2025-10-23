@@ -41,70 +41,97 @@ const CameraFeed = forwardRef(function CameraFeed(
       maskCanvas.width = 256;
       maskCanvas.height = 192;
       maskCanvasRef.current = maskCanvas;
+      
+      // Create initial empty mask so particles can start
+      const ctx = maskCanvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = 'black';
+      ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      
       onMaskReady && onMaskReady(maskCanvas);
 
+      // Signal ready immediately so particles start drifting
+      onReady && onReady();
+      setStatus("Ready! Loading segmentation...");
+
+      // Load MediaPipe model (with timeout fallback)
       const seg = new SelfieSegmentation({
         locateFile: (file) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`,
+          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${file}`,
       });
+      
       seg.setOptions({ 
         modelSelection: 1,
         selfieMode: mirror 
       });
       segRef.current = seg;
 
+      let segmentationReady = false;
+      let segmentationError = false;
+
+      // Timeout after 10 seconds
+      const timeout = setTimeout(() => {
+        if (!segmentationReady) {
+          console.warn("Segmentation loading timeout - continuing without it");
+          setStatus("Running (basic mode)");
+        }
+      }, 10000);
+
       try {
         await seg.initialize();
-        setStatus("Ready!");
+        clearTimeout(timeout);
+        segmentationReady = true;
+        setStatus("Running (full mode)");
+        console.log("Segmentation loaded successfully!");
       } catch (e) {
-        console.error("Segmentation load error", e);
-        setError("Failed to load AI model. Check your connection and refresh.");
-        return;
+        clearTimeout(timeout);
+        segmentationError = true;
+        console.error("Segmentation load error:", e);
+        setStatus("Running (basic mode - no segmentation)");
+        // Continue without segmentation - particles will just drift
       }
 
-      const ctx = maskCanvas.getContext("2d", { willReadFrequently: true });
-
-      const loop = async () => {
-        try {
-          if (videoEl.readyState >= 2) {
-            await seg.send({ image: videoEl });
+      // Only start segmentation loop if it loaded successfully
+      if (segmentationReady && !segmentationError) {
+        const loop = async () => {
+          try {
+            if (videoEl.readyState >= 2 && segRef.current) {
+              await seg.send({ image: videoEl });
+            }
+          } catch (err) {
+            console.warn("Segmentation frame error:", err.message);
           }
-        } catch (err) {
-          console.warn("Segmentation frame error:", err.message);
-        }
-        rafRef.current = requestAnimationFrame(loop);
-      };
+          rafRef.current = requestAnimationFrame(loop);
+        };
 
-      seg.onResults((results) => {
-        if (!results.segmentationMask) return;
-        
-        const src = results.segmentationMask;
-        ctx.save();
-        
-        if (mirror) {
-          ctx.translate(maskCanvas.width, 0);
-          ctx.scale(-1, 1);
-        }
-        
-        ctx.drawImage(src, 0, 0, maskCanvas.width, maskCanvas.height);
-        ctx.restore();
+        seg.onResults((results) => {
+          if (!results.segmentationMask) return;
+          
+          const src = results.segmentationMask;
+          ctx.save();
+          
+          if (mirror) {
+            ctx.translate(maskCanvas.width, 0);
+            ctx.scale(-1, 1);
+          }
+          
+          ctx.drawImage(src, 0, 0, maskCanvas.width, maskCanvas.height);
+          ctx.restore();
 
-        const img = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-        const d = img.data;
-        
-        for (let i = 0; i < d.length; i += 4) {
-          const v = d[i];
-          const on = v > 140 ? 255 : 0;
-          d[i] = d[i + 1] = d[i + 2] = on;
-          d[i + 3] = 255;
-        }
-        
-        ctx.putImageData(img, 0, 0);
-      });
+          const img = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+          const d = img.data;
+          
+          for (let i = 0; i < d.length; i += 4) {
+            const v = d[i];
+            const on = v > 140 ? 255 : 0;
+            d[i] = d[i + 1] = d[i + 2] = on;
+            d[i + 3] = 255;
+          }
+          
+          ctx.putImageData(img, 0, 0);
+        });
 
-      onReady && onReady();
-      setStatus("Running");
-      loop();
+        loop();
+      }
       
     } catch (err) {
       console.error("Camera startup error:", err);
@@ -198,7 +225,7 @@ const CameraFeed = forwardRef(function CameraFeed(
         </div>
       )}
 
-      {started && status !== "Running" && (
+      {started && status.includes("Error") === false && status !== "Running (full mode)" && status !== "Running (basic mode)" && status !== "Running (basic mode - no segmentation)" && (
         <div
           style={{
             position: "absolute",
