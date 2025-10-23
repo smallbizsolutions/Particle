@@ -11,13 +11,11 @@ const CameraFeed = forwardRef(function CameraFeed(
   const rafRef = useRef(null);
   const [started, setStarted] = useState(false);
   const [error, setError] = useState(null);
-  const [status, setStatus] = useState("Waiting to start...");
 
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
   async function startCamera() {
     setError(null);
-    setStatus("Requesting camera access...");
     
     try {
       setStarted(true);
@@ -35,77 +33,44 @@ const CameraFeed = forwardRef(function CameraFeed(
       
       videoEl.srcObject = stream;
       await videoEl.play();
-      setStatus("Loading AI model...");
+
+      // Wait a moment for video to be ready
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const maskCanvas = document.createElement("canvas");
-      maskCanvas.width = 256;
-      maskCanvas.height = 192;
+      maskCanvas.width = 320;
+      maskCanvas.height = 240;
       maskCanvasRef.current = maskCanvas;
-      
-      // Create initial empty mask so particles can start
       const ctx = maskCanvas.getContext("2d", { willReadFrequently: true });
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-      
-      onMaskReady && onMaskReady(maskCanvas);
 
-      // Signal ready immediately so particles start drifting
-      onReady && onReady();
-      setStatus("Ready! Loading segmentation...");
-
-      // Load MediaPipe model (with timeout fallback)
+      // Create segmentation
       const seg = new SelfieSegmentation({
         locateFile: (file) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${file}`,
+          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${file}`,
       });
       
       seg.setOptions({ 
-        modelSelection: 1,
+        modelSelection: 0,  // Changed to 0 for better compatibility
         selfieMode: mirror 
       });
+      
       segRef.current = seg;
 
-      let segmentationReady = false;
-      let segmentationError = false;
+      // Initialize segmentation
+      await seg.initialize();
+      
+      console.log("✅ Segmentation ready!");
 
-      // Timeout after 10 seconds
-      const timeout = setTimeout(() => {
-        if (!segmentationReady) {
-          console.warn("Segmentation loading timeout - continuing without it");
-          setStatus("Running (basic mode)");
+      let isProcessing = false;
+
+      // Results handler
+      seg.onResults((results) => {
+        if (!results || !results.segmentationMask) {
+          console.warn("No segmentation mask");
+          return;
         }
-      }, 10000);
-
-      try {
-        await seg.initialize();
-        clearTimeout(timeout);
-        segmentationReady = true;
-        setStatus("Running (full mode)");
-        console.log("Segmentation loaded successfully!");
-      } catch (e) {
-        clearTimeout(timeout);
-        segmentationError = true;
-        console.error("Segmentation load error:", e);
-        setStatus("Running (basic mode - no segmentation)");
-        // Continue without segmentation - particles will just drift
-      }
-
-      // Only start segmentation loop if it loaded successfully
-      if (segmentationReady && !segmentationError) {
-        const loop = async () => {
-          try {
-            if (videoEl.readyState >= 2 && segRef.current) {
-              await seg.send({ image: videoEl });
-            }
-          } catch (err) {
-            console.warn("Segmentation frame error:", err.message);
-          }
-          rafRef.current = requestAnimationFrame(loop);
-        };
-
-        seg.onResults((results) => {
-          if (!results.segmentationMask) return;
-          
+        
+        try {
           const src = results.segmentationMask;
           ctx.save();
           
@@ -117,43 +82,63 @@ const CameraFeed = forwardRef(function CameraFeed(
           ctx.drawImage(src, 0, 0, maskCanvas.width, maskCanvas.height);
           ctx.restore();
 
+          // Binary threshold
           const img = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
           const d = img.data;
           
           for (let i = 0; i < d.length; i += 4) {
             const v = d[i];
-            const on = v > 140 ? 255 : 0;
+            const on = v > 128 ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = on;
             d[i + 3] = 255;
           }
           
           ctx.putImageData(img, 0, 0);
-        });
+          isProcessing = false;
+        } catch (err) {
+          console.error("Mask processing error:", err);
+          isProcessing = false;
+        }
+      });
 
-        loop();
-      }
+      // Pass mask canvas to parent
+      onMaskReady && onMaskReady(maskCanvas);
+      onReady && onReady();
+
+      // Processing loop
+      const loop = async () => {
+        try {
+          if (!isProcessing && videoEl.readyState >= 2) {
+            isProcessing = true;
+            await seg.send({ image: videoEl });
+          }
+        } catch (err) {
+          console.error("Send error:", err);
+          isProcessing = false;
+        }
+        rafRef.current = requestAnimationFrame(loop);
+      };
+
+      loop();
       
     } catch (err) {
-      console.error("Camera startup error:", err);
+      console.error("Startup error:", err);
       const msg = err.name === 'NotAllowedError' 
-        ? "Camera permission denied. Please allow camera access and refresh."
+        ? "Camera permission denied. Please refresh and allow camera access."
         : err.name === 'NotFoundError'
-        ? "No camera found on this device."
-        : "Could not access camera. Check permissions and try again.";
+        ? "No camera found."
+        : "Camera error. Please refresh and try again.";
       setError(msg);
-      setStatus("Error");
     }
   }
 
   useEffect(() => {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (segRef.current && segRef.current.close) {
+      if (segRef.current) {
         try {
           segRef.current.close();
-        } catch (e) {
-          console.warn("Segmentation cleanup error:", e);
-        }
+        } catch (e) {}
       }
       const v = videoRef.current;
       if (v && v.srcObject) {
@@ -187,7 +172,7 @@ const CameraFeed = forwardRef(function CameraFeed(
             onClick={startCamera}
             style={{
               padding: "16px 32px",
-              fontSize: "16px",
+              fontSize: "18px",
               fontWeight: 600,
               borderRadius: "12px",
               background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)",
@@ -195,23 +180,20 @@ const CameraFeed = forwardRef(function CameraFeed(
               color: "white",
               cursor: "pointer",
               boxShadow: "0 4px 12px rgba(59, 130, 246, 0.4)",
-              transition: "transform 0.2s",
             }}
-            onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.95)"}
-            onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
           >
             🎥 Start Camera
           </button>
-          <p style={{ marginTop: "12px", fontSize: "13px", opacity: 0.8 }}>
-            Tap to grant camera permission
+          <p style={{ marginTop: "12px", fontSize: "14px", opacity: 0.8 }}>
+            Particles will attach to your outline
           </p>
           {error && (
             <div
               style={{
                 marginTop: "16px",
                 padding: "12px 20px",
-                background: "rgba(248, 113, 113, 0.15)",
-                border: "1px solid rgba(248, 113, 113, 0.3)",
+                background: "rgba(248, 113, 113, 0.2)",
+                border: "1px solid rgba(248, 113, 113, 0.4)",
                 borderRadius: "8px",
                 color: "#fca5a5",
                 fontSize: "13px",
@@ -222,26 +204,6 @@ const CameraFeed = forwardRef(function CameraFeed(
               {error}
             </div>
           )}
-        </div>
-      )}
-
-      {started && status.includes("Error") === false && status !== "Running (full mode)" && status !== "Running (basic mode)" && status !== "Running (basic mode - no segmentation)" && (
-        <div
-          style={{
-            position: "absolute",
-            top: "50%",
-            left: "50%",
-            transform: "translate(-50%, -50%)",
-            padding: "12px 24px",
-            background: "rgba(0, 0, 0, 0.7)",
-            borderRadius: "8px",
-            color: "white",
-            fontSize: "14px",
-            zIndex: 15,
-            backdropFilter: "blur(8px)",
-          }}
-        >
-          {status}
         </div>
       )}
 
