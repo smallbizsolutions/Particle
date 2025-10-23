@@ -34,87 +34,80 @@ const CameraFeed = forwardRef(function CameraFeed(
       videoEl.srcObject = stream;
       await videoEl.play();
 
-      // Wait a moment for video to be ready
-      await new Promise(resolve => setTimeout(resolve, 500));
-
       const maskCanvas = document.createElement("canvas");
-      maskCanvas.width = 320;
-      maskCanvas.height = 240;
+      maskCanvas.width = 256;
+      maskCanvas.height = 192;
       maskCanvasRef.current = maskCanvas;
       const ctx = maskCanvas.getContext("2d", { willReadFrequently: true });
+
+      // Send empty mask immediately so particles start
+      onMaskReady && onMaskReady(maskCanvas);
+      onReady && onReady();
 
       // Create segmentation
       const seg = new SelfieSegmentation({
         locateFile: (file) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${file}`,
+          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`,
       });
       
       seg.setOptions({ 
-        modelSelection: 0,  // Changed to 0 for better compatibility
+        modelSelection: 1,
         selfieMode: mirror 
       });
       
       segRef.current = seg;
 
-      // Initialize segmentation
-      await seg.initialize();
-      
-      console.log("✅ Segmentation ready!");
-
       let isProcessing = false;
 
       // Results handler
-      seg.onResults((results) => {
+      seg.onResults = (results) => {
         if (!results || !results.segmentationMask) {
-          console.warn("No segmentation mask");
+          isProcessing = false;
           return;
         }
         
-        try {
-          const src = results.segmentationMask;
-          ctx.save();
-          
-          if (mirror) {
-            ctx.translate(maskCanvas.width, 0);
-            ctx.scale(-1, 1);
-          }
-          
-          ctx.drawImage(src, 0, 0, maskCanvas.width, maskCanvas.height);
-          ctx.restore();
-
-          // Binary threshold
-          const img = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-          const d = img.data;
-          
-          for (let i = 0; i < d.length; i += 4) {
-            const v = d[i];
-            const on = v > 128 ? 255 : 0;
-            d[i] = d[i + 1] = d[i + 2] = on;
-            d[i + 3] = 255;
-          }
-          
-          ctx.putImageData(img, 0, 0);
-          isProcessing = false;
-        } catch (err) {
-          console.error("Mask processing error:", err);
-          isProcessing = false;
+        const src = results.segmentationMask;
+        ctx.save();
+        
+        if (mirror) {
+          ctx.translate(maskCanvas.width, 0);
+          ctx.scale(-1, 1);
         }
-      });
+        
+        ctx.drawImage(src, 0, 0, maskCanvas.width, maskCanvas.height);
+        ctx.restore();
 
-      // Pass mask canvas to parent
-      onMaskReady && onMaskReady(maskCanvas);
-      onReady && onReady();
+        // Binary threshold
+        const img = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+        const d = img.data;
+        
+        for (let i = 0; i < d.length; i += 4) {
+          const v = d[i];
+          const on = v > 128 ? 255 : 0;
+          d[i] = d[i + 1] = d[i + 2] = on;
+          d[i + 3] = 255;
+        }
+        
+        ctx.putImageData(img, 0, 0);
+        isProcessing = false;
+      };
+
+      // Initialize
+      try {
+        await seg.initialize();
+      } catch (e) {
+        console.log("Segmentation init failed, continuing anyway");
+      }
 
       // Processing loop
       const loop = async () => {
-        try {
-          if (!isProcessing && videoEl.readyState >= 2) {
-            isProcessing = true;
+        if (!isProcessing && videoEl.readyState >= 2 && seg) {
+          isProcessing = true;
+          try {
             await seg.send({ image: videoEl });
+          } catch (err) {
+            isProcessing = false;
           }
-        } catch (err) {
-          console.error("Send error:", err);
-          isProcessing = false;
         }
         rafRef.current = requestAnimationFrame(loop);
       };
@@ -123,12 +116,7 @@ const CameraFeed = forwardRef(function CameraFeed(
       
     } catch (err) {
       console.error("Startup error:", err);
-      const msg = err.name === 'NotAllowedError' 
-        ? "Camera permission denied. Please refresh and allow camera access."
-        : err.name === 'NotFoundError'
-        ? "No camera found."
-        : "Camera error. Please refresh and try again.";
-      setError(msg);
+      setError("Camera error. Please refresh.");
     }
   }
 
@@ -171,20 +159,20 @@ const CameraFeed = forwardRef(function CameraFeed(
           <button
             onClick={startCamera}
             style={{
-              padding: "16px 32px",
+              padding: "18px 36px",
               fontSize: "18px",
               fontWeight: 600,
-              borderRadius: "12px",
+              borderRadius: "14px",
               background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)",
               border: "none",
               color: "white",
               cursor: "pointer",
-              boxShadow: "0 4px 12px rgba(59, 130, 246, 0.4)",
+              boxShadow: "0 6px 16px rgba(59, 130, 246, 0.5)",
             }}
           >
             🎥 Start Camera
           </button>
-          <p style={{ marginTop: "12px", fontSize: "14px", opacity: 0.8 }}>
+          <p style={{ marginTop: "14px", fontSize: "15px", opacity: 0.85 }}>
             Particles will attach to your outline
           </p>
           {error && (
@@ -194,10 +182,10 @@ const CameraFeed = forwardRef(function CameraFeed(
                 padding: "12px 20px",
                 background: "rgba(248, 113, 113, 0.2)",
                 border: "1px solid rgba(248, 113, 113, 0.4)",
-                borderRadius: "8px",
+                borderRadius: "10px",
                 color: "#fca5a5",
-                fontSize: "13px",
-                maxWidth: "320px",
+                fontSize: "14px",
+                maxWidth: "340px",
                 textAlign: "center",
               }}
             >
