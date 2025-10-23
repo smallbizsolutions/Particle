@@ -1,14 +1,14 @@
 import React, { useEffect, useRef } from 'react';
 
-const BASE_PARTICLE_COUNT = 1600;
-const SIZE_MIN = 0.8;
-const SIZE_MAX = 1.8;
+const BASE_PARTICLE_COUNT = 2000;
+const SIZE_MIN = 1.2;
+const SIZE_MAX = 2.4;
 
-const EDGE_THRESHOLD = 60;
-const EDGE_SMOOTH = 0.65;
-const STICK_FORCE = 0.45;
-const TANGENTIAL_JITTER = 0.4;
-const DRAG = 0.88;
+const EDGE_THRESHOLD = 20;        // Much lower - detect more edges
+const EDGE_SMOOTH = 0.5;
+const STICK_FORCE = 0.8;          // Much stronger attraction
+const TANGENTIAL_JITTER = 0.5;
+const DRAG = 0.85;
 const SPEED_THRESHOLD = 3;
 
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -27,9 +27,7 @@ export default function ParticleCanvas({
   const particlesRef = useRef([]);
   const edgeFieldRef = useRef(null);
   const smoothMagRef = useRef(null);
-  const edgeUpdateCounter = useRef(0);
   const prevPosRef = useRef(new Map());
-  const debugRef = useRef({ hasEdges: false, particleCount: 0 });
 
   useEffect(() => {
     if (!running) return;
@@ -46,9 +44,8 @@ export default function ParticleCanvas({
     resize();
     window.addEventListener('resize', resize);
 
-    const count = Math.floor(BASE_PARTICLE_COUNT * intensity * (isMobile ? 0.6 : 1));
+    const count = Math.floor(BASE_PARTICLE_COUNT * intensity * (isMobile ? 0.7 : 1));
     particlesRef.current = initParticles(count, canvas);
-    debugRef.current.particleCount = count;
 
     let frameCount = 0;
 
@@ -56,41 +53,23 @@ export default function ParticleCanvas({
       frameCount++;
       
       if (maskCanvas) {
-        if (edgeUpdateCounter.current++ % 2 === 0) {
-          const field = computeEdgeField(
-            maskCanvas, 
-            EDGE_THRESHOLD, 
-            edgeFieldRef.current, 
-            smoothMagRef.current
-          );
-          edgeFieldRef.current = field;
-          smoothMagRef.current = field.mag;
-          debugRef.current.hasEdges = field.edgeCount > 0;
+        // Compute edges every frame for responsiveness
+        const field = computeEdgeField(maskCanvas, EDGE_THRESHOLD, smoothMagRef.current);
+        edgeFieldRef.current = field;
+        smoothMagRef.current = field.mag;
+        
+        if (frameCount % 120 === 0) {
+          console.log('Edge count:', field.edgeCount, 'Particles:', particlesRef.current.length);
         }
         
         if (edgeFieldRef.current) {
-          stepParticles(
-            particlesRef.current, 
-            canvas, 
-            edgeFieldRef.current,
-            prevPosRef.current
-          );
+          stepParticles(particlesRef.current, canvas, edgeFieldRef.current, prevPosRef.current);
         }
       } else {
         driftParticles(particlesRef.current, canvas);
       }
       
       drawParticles(ctx, particlesRef.current, theme, trailEffect);
-      
-      if (frameCount % 60 === 0) {
-        console.log('Particle Debug:', {
-          hasEdges: debugRef.current.hasEdges,
-          particleCount: particlesRef.current.length,
-          firstParticle: particlesRef.current[0] ? 
-            `(${particlesRef.current[0].x.toFixed(1)}, ${particlesRef.current[0].y.toFixed(1)})` : 'none'
-        });
-      }
-      
       rafRef.current = requestAnimationFrame(loop);
     };
     
@@ -112,7 +91,8 @@ export default function ParticleCanvas({
         position: 'absolute',
         top: 0,
         left: 0,
-        pointerEvents: 'none'
+        pointerEvents: 'none',
+        zIndex: 10
       }} 
     />
   );
@@ -138,7 +118,7 @@ function initParticles(count, canvas) {
   return arr;
 }
 
-function computeEdgeField(maskCanvas, threshold, prevField, prevMagShared) {
+function computeEdgeField(maskCanvas, threshold, prevMagShared) {
   const w = maskCanvas.width, h = maskCanvas.height;
   const ctx = maskCanvas.getContext('2d');
   const img = ctx.getImageData(0, 0, w, h).data;
@@ -155,6 +135,7 @@ function computeEdgeField(maskCanvas, threshold, prevField, prevMagShared) {
     return img[i];
   };
 
+  // Sobel edge detection
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const tl = at(x - 1, y - 1), tc = at(x, y - 1), tr = at(x + 1, y - 1);
@@ -168,6 +149,7 @@ function computeEdgeField(maskCanvas, threshold, prevField, prevMagShared) {
       const idx = y * w + x;
       let m = g > threshold ? g : 0;
 
+      // Temporal smoothing
       if (prevMagShared && prevMagShared.length === mag.length) {
         m = prevMagShared[idx] * EDGE_SMOOTH + m * (1 - EDGE_SMOOTH);
       }
@@ -185,33 +167,44 @@ function computeEdgeField(maskCanvas, threshold, prevField, prevMagShared) {
 
 function stepParticles(particles, canvas, field, prevPosMap) {
   const W = canvas.clientWidth, H = canvas.clientHeight;
-  const { w, h, mag, gx, gy } = field;
+  const { w, h, mag, gx, gy, edgeCount } = field;
 
+  if (edgeCount === 0) {
+    // No edges - just drift
+    driftParticles(particles, canvas);
+    return;
+  }
+
+  // Build comprehensive edge sample pool
   const samples = [];
-  const sampleCount = Math.min(800, Math.floor(w * h * 0.02));
   
-  for (let i = 0; i < sampleCount; i++) {
-    const x = Math.floor(Math.random() * w);
-    const y = Math.floor(Math.random() * h);
-    const idx = y * w + x;
-    if (mag[idx] > 0) {
-      samples.push({ x, y, idx, strength: mag[idx] });
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (mag[idx] > 0) {
+        samples.push({ x, y, idx, strength: mag[idx] });
+      }
     }
   }
 
-  const scaleX = W / w, scaleY = H / h;
+  const scaleX = W / w;
+  const scaleY = H / h;
 
   for (let p of particles) {
     const oldPos = prevPosMap.get(p) || { x: p.x, y: p.y };
     
     if (samples.length > 0) {
-      let best = null, bestD = Infinity;
-      const checkCount = Math.min(5, samples.length);
+      // Find nearest edge point from multiple random samples
+      let best = null;
+      let bestD = Infinity;
+      const checkCount = Math.min(8, samples.length);
       
       for (let k = 0; k < checkCount; k++) {
         const s = samples[Math.floor(Math.random() * samples.length)];
-        const tx = s.x * scaleX, ty = s.y * scaleY;
-        const dx = tx - p.x, dy = ty - p.y;
+        const tx = s.x * scaleX;
+        const ty = s.y * scaleY;
+        const dx = tx - p.x;
+        const dy = ty - p.y;
         const d2 = dx*dx + dy*dy;
         
         if (d2 < bestD) {
@@ -221,46 +214,60 @@ function stepParticles(particles, canvas, field, prevPosMap) {
       }
 
       if (best) {
-        const dx = best.tx - p.x, dy = best.ty - p.y;
+        // Strong attraction to edge
+        const dx = best.tx - p.x;
+        const dy = best.ty - p.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
         
-        if (dist > 1) {
-          const force = STICK_FORCE * (best.strength / 100);
+        if (dist > 0.5) {
+          const force = STICK_FORCE * Math.min(1, best.strength / 50);
           p.vx += (dx / dist) * force;
           p.vy += (dy / dist) * force;
         }
 
-        const gxv = gx[best.idx], gyv = gy[best.idx];
+        // Tangential shimmer
+        const gxv = gx[best.idx];
+        const gyv = gy[best.idx];
         const glen = Math.hypot(gxv, gyv) || 1;
-        const tx = -gyv / glen, ty = gxv / glen;
+        const tx = -gyv / glen;
+        const ty = gxv / glen;
         const jitter = (Math.random() - 0.5) * TANGENTIAL_JITTER;
         
         p.vx += tx * jitter;
         p.vy += ty * jitter;
       }
+    } else {
+      // Gentle drift if no samples
+      p.vx += (Math.random() - 0.5) * 0.05;
+      p.vy += (Math.random() - 0.5) * 0.05;
     }
 
+    // Apply drag
     p.vx *= DRAG;
     p.vy *= DRAG;
 
+    // Move
     p.x += p.vx;
     p.y += p.vy;
 
+    // Motion-reactive sizing
     const speed = Math.hypot(p.x - oldPos.x, p.y - oldPos.y);
     
     if (speed > SPEED_THRESHOLD) {
-      const boost = Math.min(speed / 15, 1.5);
-      p.size = p.baseSize * (1 + boost * 0.5);
+      const boost = Math.min(speed / 12, 1.8);
+      p.size = p.baseSize * (1 + boost * 0.6);
     } else {
-      p.size = p.size * 0.95 + p.baseSize * 0.05;
+      p.size = p.size * 0.93 + p.baseSize * 0.07;
     }
 
-    if (p.x < -10) p.x = W + 10;
-    else if (p.x > W + 10) p.x = -10;
-    if (p.y < -10) p.y = H + 10;
-    else if (p.y > H + 10) p.y = -10;
+    // Wrap edges
+    if (p.x < -20) p.x = W + 20;
+    else if (p.x > W + 20) p.x = -20;
+    if (p.y < -20) p.y = H + 20;
+    else if (p.y > H + 20) p.y = -20;
 
-    p.life += 0.008 + Math.random() * 0.004;
+    // Life cycle
+    p.life += 0.01 + Math.random() * 0.005;
     if (p.life > 1) p.life = 0;
 
     prevPosMap.set(p, { x: p.x, y: p.y });
@@ -271,10 +278,10 @@ function driftParticles(particles, canvas) {
   const W = canvas.clientWidth, H = canvas.clientHeight;
   
   for (let p of particles) {
-    p.vx += (Math.random() - 0.5) * 0.1;
-    p.vy += (Math.random() - 0.5) * 0.1;
-    p.vx *= 0.95;
-    p.vy *= 0.95;
+    p.vx += (Math.random() - 0.5) * 0.15;
+    p.vy += (Math.random() - 0.5) * 0.15;
+    p.vx *= 0.92;
+    p.vy *= 0.92;
     
     p.x += p.vx;
     p.y += p.vy;
@@ -293,7 +300,7 @@ function drawParticles(ctx, particles, theme, trailEffect) {
   const { width, height } = ctx.canvas;
   
   if (trailEffect) {
-    ctx.fillStyle = 'rgba(11, 11, 18, 0.2)';
+    ctx.fillStyle = 'rgba(11, 11, 18, 0.25)';
     ctx.fillRect(0, 0, width, height);
   } else {
     ctx.clearRect(0, 0, width, height);
@@ -302,21 +309,23 @@ function drawParticles(ctx, particles, theme, trailEffect) {
   ctx.globalCompositeOperation = 'lighter';
 
   for (let p of particles) {
-    const hue = theme.baseHue + Math.sin(p.life * Math.PI * 2) * 16 + p.hueOffset;
-    const brightness = 65 + Math.sin(p.life * Math.PI * 4) * 10;
-    const alpha = 0.5 + 0.3 * Math.sin(p.life * Math.PI * 2);
+    const hue = theme.baseHue + Math.sin(p.life * Math.PI * 2) * 18 + p.hueOffset;
+    const brightness = 70 + Math.sin(p.life * Math.PI * 4) * 12;
+    const alpha = 0.6 + 0.3 * Math.sin(p.life * Math.PI * 2);
     
-    const glowSize = p.size * 2.5 * theme.glow;
+    // Glow
+    const glowSize = p.size * 3 * theme.glow;
     const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowSize);
     gradient.addColorStop(0, `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness}%, ${alpha})`);
-    gradient.addColorStop(0.5, `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness}%, ${alpha * 0.4})`);
+    gradient.addColorStop(0.4, `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness}%, ${alpha * 0.5})`);
     gradient.addColorStop(1, `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness}%, 0)`);
     
     ctx.fillStyle = gradient;
     ctx.fillRect(p.x - glowSize, p.y - glowSize, glowSize * 2, glowSize * 2);
     
+    // Core
     ctx.beginPath();
-    ctx.fillStyle = `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness + 10}%, ${alpha * 1.2})`;
+    ctx.fillStyle = `hsla(${hue}, ${Math.round(theme.saturation * 100)}%, ${brightness + 15}%, ${alpha * 1.3})`;
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
     ctx.fill();
   }
